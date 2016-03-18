@@ -358,7 +358,7 @@ namespace Dapper
         /// <para>Updates a record or records in the database</para>
         /// <para>By default updates records in the table matching the class name</para>
         /// <para>-Table name can be overridden by adding an attribute on your class [Table("YourTableName")]</para>
-        /// <para>Updates records where the Id property and properties with the [Key] attribute match those in the database.</para>
+        /// <para>Updates records where the Id property and properties with the [Key] attribute and/or [Version] attribute match those in the database.</para>
         /// <para>Properties marked with attribute [Editable(false)] and complex types are ignored</para>
         /// <para>Supports transaction and command timeout</para>
         /// <para>Returns number of rows effected</para>
@@ -371,6 +371,7 @@ namespace Dapper
         public static int Update(this IDbConnection connection, object entityToUpdate, IDbTransaction transaction = null, int? commandTimeout = null)
         {
             var idProps = GetIdProperties(entityToUpdate).ToList();
+            var versionProps = GetVersionProperties(entityToUpdate).ToList();
 
             if (!idProps.Any())
                 throw new ArgumentException("Entity must have at least one [Key] or Id property");
@@ -384,6 +385,7 @@ namespace Dapper
             BuildUpdateSet(entityToUpdate, sb);
             sb.Append(" where ");
             BuildWhere(sb, idProps, entityToUpdate);
+            BuildVersion(sb, versionProps, entityToUpdate);
 
             if (Debugger.IsAttached)
                 Trace.WriteLine(String.Format("Update: {0}", sb));
@@ -407,7 +409,7 @@ namespace Dapper
         public static int Delete<T>(this IDbConnection connection, T entityToDelete, IDbTransaction transaction = null, int? commandTimeout = null)
         {
             var idProps = GetIdProperties(entityToDelete).ToList();
-
+            var versionProps = GetVersionProperties(entityToDelete).ToList();
 
             if (!idProps.Any())
                 throw new ArgumentException("Entity must have at least one [Key] or Id property");
@@ -419,6 +421,7 @@ namespace Dapper
 
             sb.Append(" where ");
             BuildWhere(sb, idProps, entityToDelete);
+            BuildVersion(sb, idProps, entityToDelete);
 
             if (Debugger.IsAttached)
                 Trace.WriteLine(String.Format("Delete: {0}", sb));
@@ -602,6 +605,35 @@ namespace Dapper
             }
         }
 
+        //build where clause for the version based on list of properties
+        private static void BuildVersion(StringBuilder sb, IEnumerable<PropertyInfo> idProps, object sourceEntity)
+        {
+            var propertyInfos = idProps.ToArray();
+            for (var i = 0; i < propertyInfos.Count(); i++)
+            {
+                //match up generic properties to source entity properties to allow fetching of the column attribute
+                //the anonymous object used for search doesn't have the custom attributes attached to them so this allows us to build the correct where clause
+                //by converting the model type to the database column name via the column attribute
+                var propertyToUse = propertyInfos.ElementAt(i);
+                var sourceProperties = GetVersionProperties(sourceEntity).ToArray();
+                for (var x = 0; x < sourceProperties.Count(); x++)
+                {
+                    if (sourceProperties.ElementAt(x).Name == propertyInfos.ElementAt(i).Name)
+                    {
+                        propertyToUse = sourceProperties.ElementAt(x);
+                    }
+                }
+
+                if (sb.ToString().EndsWith(" where "))
+                    sb.AppendFormat("{0} = @{1}", GetColumnName(propertyToUse), propertyInfos.ElementAt(i).Name);
+                else
+                    sb.AppendFormat(" and {0} = @{1}", GetColumnName(propertyToUse), propertyInfos.ElementAt(i).Name);
+
+                if (i < propertyInfos.Count() - 1)
+                    sb.AppendFormat(" and ");
+            }
+        }
+
         private static void BuildWhere(StringBuilder sb, IEnumerable<PropertyInfo> idProps, object sourceEntity, object whereConditions = null)
         {
             var propertyInfos = idProps.ToArray();
@@ -778,6 +810,21 @@ namespace Dapper
             return tp.Any() ? tp : type.GetProperties().Where(p => p.Name == "Id");
         }
 
+        //Get all properties that are named Version or have the Version attribute
+        //For Updates we have a whole entity so this method is used
+        private static IEnumerable<PropertyInfo> GetVersionProperties(object entity)
+        {
+            var type = entity.GetType();
+            return GetVersionProperties(type);
+        }
+
+        //Get all properties that are named Version or have the Version attribute
+        //For Delete(id) we don't have an entity, just the type so this method is used
+        private static IEnumerable<PropertyInfo> GetVersionProperties(Type type)
+        {
+            var tp = type.GetProperties().Where(p => p.GetCustomAttributes(true).Any(attr => attr.GetType().Name == "VersionAttribute")).ToList();
+            return tp.Any() ? tp : type.GetProperties().Where(p => p.Name == "Version");
+        }
 
         //Gets the table name for this entity
         //For Inserts and updates we have a whole entity so this method is used
@@ -930,6 +977,15 @@ namespace Dapper
     /// </summary>
     [AttributeUsage(AttributeTargets.Property)]
     public class RequiredAttribute : Attribute
+    {
+    }
+
+    /// <summary>
+    /// Optional Version attribute.
+    /// You can use the System.ComponentModel.DataAnnotations version in its place to specify the version property of a poco
+    /// </summary>
+    [AttributeUsage(AttributeTargets.Property)]
+    public class VersionAttribute : Attribute
     {
     }
 
